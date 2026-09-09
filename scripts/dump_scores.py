@@ -22,15 +22,23 @@ mathematically equivalent, and empirically they agree exactly -- all 16 example-
 metrics for base/test reproduce baseline.json to 4dp -- so padding composition does not
 perturb the result here.
 
+Runs are chunked and resumable, because a full large/train pass is ~3h on a 4GB GPU and
+the machine is also the user's daily driver. Each chunk is saved to artifacts/parts/ the
+moment it finishes; re-running the same command skips whatever is already on disk and
+merges into the canonical dump once every chunk is present. `--max-chunks` bounds how
+much work one session does, so the GPU can be handed back on demand.
+
 Usage:
     # smoke test first -- 64 samples, ~15s
     python scripts/dump_scores.py --model base --split test --limit 64
 
-    # the real runs
-    python scripts/dump_scores.py --model base  --split test
-    python scripts/dump_scores.py --model base  --split train
-    python scripts/dump_scores.py --model large --split test  --batch-size 2
-    python scripts/dump_scores.py --model large --split train --batch-size 2
+    # run a few chunks now, hand the GPU back, continue later with the same command
+    python scripts/dump_scores.py --model large --split train --max-chunks 3
+    python scripts/dump_scores.py --model large --split train --max-chunks 3
+    ...
+
+    # or run a whole split in one go
+    python scripts/dump_scores.py --model large --split test
 
     # acceptance gate (test split only -- train has no published reference)
     python scripts/dump_scores.py --model base --split test --verify
@@ -77,30 +85,21 @@ def out_path(model: str, split: str, limit: int | None = None) -> Path:
     return OUT_DIR / f"scores_{model}_{split}{suffix}.npz"
 
 
+def part_path(model: str, split: str, start: int, end: int, limit: int | None = None) -> Path:
+    # Both bounds go in the name. If a later run uses a different --chunk or --limit,
+    # its filenames simply will not match, so a stale part can never be silently
+    # mistaken for covering a range it does not.
+    suffix = f"_limit{limit}" if limit else ""
+    return OUT_DIR / "parts" / f"{model}_{split}{suffix}_{start:06d}_{end:06d}.npz"
+
+
 # ----------------------------------------------------------------------------
 # Dump
 # ----------------------------------------------------------------------------
 
 
-def dump(model_key: str, split: str, batch_size: int, limit: int | None) -> Path:
-    raw = json.loads(DATA.read_text(encoding="utf-8"))
-    # Keep the index into the full file so dumps can be joined back to the source
-    # rows (task_type, taxonomy labels, answer text) without re-deriving an order.
-    keep = [(i, s) for i, s in enumerate(raw) if s["split"] == split]
-    if limit:
-        keep = keep[:limit]
-    source_idx = np.array([i for i, _ in keep], dtype=np.int32)
-
-    samples = HallucinationData.from_json([s for _, s in keep]).samples
-    print(f"{model_key}/{split}: {len(samples)} samples")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AutoModelForTokenClassification.from_pretrained(
-        MODELS[model_key], trust_remote_code=True
-    ).to(device)
-    model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(MODELS[model_key])
-
+def _score_chunk(model, tokenizer, device, samples, batch_size, desc) -> dict:
+    """Run the model over one contiguous slice of samples and keep the probabilities."""
     loader = DataLoader(
         HallucinationDataset(samples, tokenizer),
         batch_size=batch_size,
@@ -111,12 +110,11 @@ def dump(model_key: str, split: str, batch_size: int, limit: int | None) -> Path
     )
 
     # Ragged per-sample token counts, so store one flat array plus slice boundaries.
-    chunks: list[np.ndarray] = []
-    lengths: list[int] = []
+    per_sample: list[np.ndarray] = []
     y_true: list[int] = []
 
     with torch.no_grad():
-        for batch in tqdm(loader, desc=f"{model_key}/{split}"):
+        for batch in tqdm(loader, desc=desc):
             outputs = model(
                 batch["input_ids"].to(device),
                 attention_mask=batch["attention_mask"].to(device),
@@ -130,30 +128,137 @@ def dump(model_key: str, split: str, batch_size: int, limit: int | None) -> Path
 
                 if valid.sum().item() == 0:
                     # evaluate_model_example_level scores these as clean with p=0.0.
-                    chunks.append(np.zeros(0, dtype=np.float32))
-                    lengths.append(0)
+                    per_sample.append(np.zeros(0, dtype=np.float32))
                     y_true.append(0)
                     continue
 
-                p1 = probs[i][valid][:, 1].float().cpu().numpy().astype(np.float32)
-                chunks.append(p1)
-                lengths.append(len(p1))
+                per_sample.append(probs[i][valid][:, 1].float().cpu().numpy().astype(np.float32))
                 y_true.append(int((labels[valid] == 1).any().item()))
+
+    return {"per_sample": per_sample, "y_true": y_true}
+
+
+def _pack(per_sample: list[np.ndarray], y_true, task_type, source_idx, model_id, split) -> dict:
+    lengths = [len(p) for p in per_sample]
+    return {
+        "probs": np.concatenate(per_sample) if per_sample else np.zeros(0, dtype=np.float32),
+        # offsets[i]:offsets[i+1] slices out sample i's tokens
+        "offsets": np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
+        "y_true": np.array(y_true, dtype=np.int8),
+        "task_type": np.array(task_type),
+        "source_idx": np.array(source_idx, dtype=np.int32),
+        "model": model_id,
+        "split": split,
+    }
+
+
+def dump(
+    model_key: str,
+    split: str,
+    batch_size: int,
+    limit: int | None,
+    chunk: int,
+    max_chunks: int | None,
+) -> Path | None:
+    """Score a split in resumable chunks, then merge them into one canonical dump.
+
+    A full large/train pass is ~3h on a 4GB GPU. Chunking lets that be spread over
+    several sessions: each chunk is written as soon as it finishes, and re-running the
+    same command skips chunks that already exist. `--max-chunks` stops after a fixed
+    amount of work so the GPU can be handed back.
+
+    Chunk boundaries change which samples get padded together, relative to a single
+    pass. That is provably harmless here -- see the note in the module docstring -- and
+    `--verify` re-checks it against the baseline after merging anyway.
+    """
+    raw = json.loads(DATA.read_text(encoding="utf-8"))
+    # Keep the index into the full file so dumps can be joined back to the source
+    # rows (task_type, taxonomy labels, answer text) without re-deriving an order.
+    keep = [(i, s) for i, s in enumerate(raw) if s["split"] == split]
+    if limit:
+        keep = keep[:limit]
+    total = len(keep)
+
+    bounds = [(s, min(s + chunk, total)) for s in range(0, total, chunk)]
+    todo = [b for b in bounds if not part_path(model_key, split, *b, limit).exists()]
+    done = len(bounds) - len(todo)
+    if max_chunks is not None:
+        todo = todo[:max_chunks]
+
+    print(f"{model_key}/{split}: {total} samples, {len(bounds)} chunks of {chunk}")
+    print(f"  already done {done}, running {len(todo)} now, "
+          f"{len(bounds) - done - len(todo)} left after this")
+
+    if todo:
+        (OUT_DIR / "parts").mkdir(parents=True, exist_ok=True)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = AutoModelForTokenClassification.from_pretrained(
+            MODELS[model_key], trust_remote_code=True
+        ).to(device)
+        model.eval()
+        tokenizer = AutoTokenizer.from_pretrained(MODELS[model_key])
+
+        for start, end in todo:
+            piece = keep[start:end]
+            scored = _score_chunk(
+                model,
+                tokenizer,
+                device,
+                HallucinationData.from_json([s for _, s in piece]).samples,
+                batch_size,
+                f"{model_key}/{split} [{start}:{end}]",
+            )
+            np.savez_compressed(
+                part_path(model_key, split, start, end, limit),
+                **_pack(
+                    scored["per_sample"],
+                    scored["y_true"],
+                    [s["task_type"] for _, s in piece],
+                    [i for i, _ in piece],
+                    MODELS[model_key],
+                    split,
+                ),
+            )
+
+    missing = [b for b in bounds if not part_path(model_key, split, *b, limit).exists()]
+    if missing:
+        print(f"\n{len(missing)} chunks still missing; re-run to continue "
+              f"(next starts at sample {missing[0][0]})")
+        return None
+
+    return merge(model_key, split, bounds, keep, limit)
+
+
+def merge(model_key: str, split: str, bounds, keep, limit: int | None) -> Path:
+    """Concatenate finished chunk files into the canonical dump, in sample order."""
+    per_sample: list[np.ndarray] = []
+    y_true: list[int] = []
+    for start, end in bounds:
+        z = np.load(part_path(model_key, split, start, end, limit), allow_pickle=False)
+        off = z["offsets"]
+        n = len(off) - 1
+        assert n == end - start, f"part [{start}:{end}] holds {n} samples, expected {end - start}"
+        per_sample.extend(z["probs"][off[i] : off[i + 1]] for i in range(n))
+        y_true.extend(z["y_true"].tolist())
+
+    assert len(per_sample) == len(keep), f"merged {len(per_sample)} samples, expected {len(keep)}"
 
     OUT_DIR.mkdir(exist_ok=True)
     path = out_path(model_key, split, limit)
     np.savez_compressed(
         path,
-        probs=np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32),
-        # offsets[i]:offsets[i+1] slices out sample i's tokens
-        offsets=np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
-        y_true=np.array(y_true, dtype=np.int8),
-        task_type=np.array([s["task_type"] for _, s in keep]),
-        source_idx=source_idx,
-        model=MODELS[model_key],
-        split=split,
+        **_pack(
+            per_sample,
+            y_true,
+            [s["task_type"] for _, s in keep],
+            [i for i, _ in keep],
+            MODELS[model_key],
+            split,
+        ),
     )
-    print(f"wrote {path}  ({path.stat().st_size / 1e6:.1f} MB, {sum(lengths)} tokens)")
+    tokens = sum(len(p) for p in per_sample)
+    print(f"\nmerged {len(bounds)} chunks -> {path}  "
+          f"({path.stat().st_size / 1e6:.1f} MB, {tokens} tokens)")
     return path
 
 
@@ -237,6 +342,12 @@ def main() -> None:
     ap.add_argument("--split", choices=["train", "test"], default="test")
     ap.add_argument("--batch-size", type=int, help="default: 4 for base, 2 for large")
     ap.add_argument("--limit", type=int, help="only dump the first N samples (smoke test)")
+    ap.add_argument("--chunk", type=int, default=1000, help="samples per resumable chunk")
+    ap.add_argument(
+        "--max-chunks",
+        type=int,
+        help="stop after this many chunks this session; re-run to continue",
+    )
     ap.add_argument("--verify", action="store_true", help="check an existing dump, do not run the model")
     ap.add_argument("--tol", type=float, default=5e-4, help="max allowed deviation from baseline.json")
     args = ap.parse_args()
@@ -249,6 +360,8 @@ def main() -> None:
         args.split,
         args.batch_size or DEFAULT_BATCH[args.model],
         args.limit,
+        args.chunk,
+        args.max_chunks,
     )
 
 
