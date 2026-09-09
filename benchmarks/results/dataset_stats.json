@@ -1,0 +1,66 @@
+{
+  "integrity": {
+    "total": 17790,
+    "train": 15090,
+    "test": 2700,
+    "test_by_task": {
+      "Summary": 900,
+      "Data2txt": 900,
+      "QA": 900
+    },
+    "test_hallucinated": 943
+  },
+  "per_task": [
+    {
+      "task_type": "Summary",
+      "n": 900,
+      "n_hallucinated": 204,
+      "base_rate": 0.22666666666666666,
+      "n_spans": 244,
+      "spans_per_hallu_example": 1.196078431372549,
+      "median_span_chars": 48.5,
+      "mean_answer_coverage": 0.13090793170147522,
+      "subtle_share": 0.11065573770491803,
+      "taxonomy": {
+        "Evident Conflict": 100,
+        "Evident Baseless Info": 117,
+        "Subtle Conflict": 11,
+        "Subtle Baseless Info": 16
+      }
+    },
+    {
+      "task_type": "Data2txt",
+      "n": 900,
+      "n_hallucinated": 579,
+      "base_rate": 0.6433333333333333,
+      "n_spans": 1054,
+      "spans_per_hallu_example": 1.8203799654576858,
+      "median_span_chars": 26.0,
+      "mean_answer_coverage": 0.06424104397871037,
+      "subtle_share": 0.09487666034155598,
+      "taxonomy": {
+        "Evident Conflict": 489,
+        "Evident Baseless Info": 465,
+        "Subtle Conflict": 5,
+        "Subtle Baseless Info": 95
+      }
+    },
+    {
+      "task_type": "QA",
+      "n": 900,
+      "n_hallucinated": 160,
+      "base_rate": 0.17777777777777778,
+      "n_spans": 235,
+      "spans_per_hallu_example": 1.46875,
+      "median_span_chars": 98,
+      "mean_answer_coverage": 0.22560201683472866,
+      "subtle_share": 0.20851063829787234,
+      "taxonomy": {
+        "Evident Conflict": 30,
+        "Evident Baseless Info": 156,
+        "Subtle Conflict": 0,
+        "Subtle Baseless Info": 49
+      }
+    }
+  ]
+}

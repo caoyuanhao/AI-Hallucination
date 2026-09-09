@@ -1,0 +1,12 @@
+{
+  "model": "KRLabsOrg/lettucedect-large-modernbert-en-v1",
+  "n": 100,
+  "device": "cuda",
+  "mean_ms": 489.8,
+  "p50_ms": 389.1,
+  "p95_ms": 1069.2,
+  "p99_ms": 1369.3,
+  "max_ms": 1369.3,
+  "throughput_per_s": 2.04,
+  "peak_vram_mb": 1728.4
+}

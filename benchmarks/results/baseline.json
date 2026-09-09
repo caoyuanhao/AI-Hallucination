@@ -1,0 +1,66 @@
+[
+  {
+    "run": "base_example_level",
+    "task_type": "Summary",
+    "precision": 0.5389,
+    "recall": 0.4755,
+    "f1": 0.5052,
+    "auroc": 0.756
+  },
+  {
+    "run": "base_example_level",
+    "task_type": "Data2txt",
+    "precision": 0.893,
+    "recall": 0.8653,
+    "f1": 0.8789,
+    "auroc": 0.9038
+  },
+  {
+    "run": "base_example_level",
+    "task_type": "QA",
+    "precision": 0.6064,
+    "recall": 0.7125,
+    "f1": 0.6552,
+    "auroc": 0.9005
+  },
+  {
+    "run": "base_example_level",
+    "task_type": "whole dataset",
+    "precision": 0.7664,
+    "recall": 0.755,
+    "f1": 0.7607,
+    "auroc": 0.8886
+  },
+  {
+    "run": "large_example_level",
+    "task_type": "Summary",
+    "precision": 0.6404,
+    "recall": 0.5588,
+    "f1": 0.5969,
+    "auroc": 0.8229
+  },
+  {
+    "run": "large_example_level",
+    "task_type": "Data2txt",
+    "precision": 0.9045,
+    "recall": 0.867,
+    "f1": 0.8854,
+    "auroc": 0.9203
+  },
+  {
+    "run": "large_example_level",
+    "task_type": "QA",
+    "precision": 0.6593,
+    "recall": 0.75,
+    "f1": 0.7018,
+    "auroc": 0.9176
+  },
+  {
+    "run": "large_example_level",
+    "task_type": "whole dataset",
+    "precision": 0.8044,
+    "recall": 0.7805,
+    "f1": 0.7922,
+    "auroc": 0.9144
+  }
+]
