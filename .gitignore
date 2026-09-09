@@ -19,3 +19,6 @@ data/
 
 # Model cache
 .cache/
+
+# Score dumps from scripts/dump_scores.py (~50MB total, regenerable)
+artifacts/
