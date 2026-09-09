@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Virtual env
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Vendored upstream repos (clone with scripts/setup.sh)
+vendor/
+
+# Datasets (downloaded, ~100MB)
+data/
+
+# Model cache
+.cache/
