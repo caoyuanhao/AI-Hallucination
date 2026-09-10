@@ -96,21 +96,28 @@ three tasks are far from interchangeable:
 
 ## Findings that shape the next step
 
-**1. Data2txt vs QA isolates the cost of the fixed threshold.**
-These two tasks rank almost identically well and score 22pp apart:
+**1. The per-task F1 spread mostly measures base rate, not detector quality.**
+Data2txt and QA rank almost identically well and score 22pp apart:
 
-| | AUROC | Base rate | F1 |
-|---|---|---|---|
-| Data2txt | 0.9038 | 64.3% | 0.8789 |
-| QA | 0.9005 | 17.8% | 0.6552 |
+| | AUROC | Base rate | F1 | Oracle-threshold F1 |
+|---|---|---|---|---|
+| Data2txt | 0.9038 | 64.3% | 0.8789 | 0.8870 |
+| QA | 0.9005 | 17.8% | 0.6552 | 0.6879 |
 
-A 0.0033 difference in ranking quality becomes a 22.4pp difference in F1. The model
-separates hallucinated from clean answers *equally well* on both; what differs is that
-a 3.6x higher base rate makes p=0.5 a near-optimal operating point on Data2txt and a
-poor one on QA. Much of Data2txt's headline 0.879 is base-rate inflation, not skill.
+A 0.0033 difference in ranking quality becomes a 22.4pp difference in F1. The detector
+separates hallucinated from clean answers *equally well* on both; the gap is a property
+of F1 under a 3.6x base-rate difference. Give each task its best possible threshold and
+19.9pp of the 22.4pp gap survives — F1 on a 17.8%-positive task simply cannot reach F1
+on a 64.3%-positive one at equal ranking quality.
 
-This is the single clearest result here: **a per-task threshold is worth up to double
-digits of F1 and costs no parameters, no training, and no extra inference.**
+So the headline per-task numbers are not commensurable, and "Data2txt is the easy task"
+is largely an artifact of how often its answers hallucinate. AUROC, which is invariant
+to base rate, says the two tasks are equally hard.
+
+> **Correction.** An earlier version of this section concluded from the same table that
+> a per-task threshold was "worth up to double digits of F1". That does not follow, and
+> it is wrong: the base-rate component of the gap is not addressable by thresholding.
+> Measured headroom is +2.20pp, not double digits — see below.
 
 **2. Summary additionally has a genuine ranking deficit — and it is not about subtlety.**
 Summary AUROC is 0.756 against ~0.90 for the other two. That gap is real capability,
@@ -133,26 +140,82 @@ the one task with a genuine ranking deficit, and barely at all on Data2txt (+0.6
 where base already ranks at AUROC 0.90. Extra capacity buys ranking quality — so it pays
 only where ranking, not thresholding, is what is broken.
 
+## Headroom probe
+
+Three directions were on the table for MVP-1. Rather than build all three, each was
+first given an *upper bound* — every threshold and escalation rate below is fitted
+directly on the test set. That is deliberate cheating, reported only as a ceiling: an
+honest method fitted on train can only land under these numbers. Two of the three
+directions did not survive.
+
+Reproduce with `python scripts/probe_headroom.py`.
+
+**Thresholds — real but small.**
+
+| Model | Shipped (max, 0.5) | Oracle global | Oracle per-task | Headroom |
+|---|---|---|---|---|
+| base | 0.7607 | 0.7726 | 0.7827 | +2.20pp |
+| large | 0.7922 | 0.7979 | 0.8027 | +1.05pp |
+
+Most of even that comes from moving the *global* threshold (+1.19pp on base); making it
+per-task adds only ~1pp more. Worth taking, since it costs nothing at inference, but it
+is not a headline.
+
+**Aggregation — no headroom at all.**
+
+| Aggregation | AUROC | Oracle global F1 | Oracle per-task F1 |
+|---|---|---|---|
+| **max** (shipped) | **0.8886** | **0.7726** | **0.7827** |
+| mean | 0.8710 | 0.7486 | 0.7739 |
+| top5mean | 0.8825 | 0.7603 | 0.7616 |
+| top10mean | 0.8807 | 0.7601 | 0.7661 |
+| logsumexp | 0.8675 | 0.7697 | 0.7825 |
+| frac>0.5 | 0.8251 | 0.7627 | 0.7673 |
+| count>0.5 | 0.8299 | 0.7607 | 0.7662 |
+
+`max` wins on every metric. Nothing about the token-probability *distribution* carries
+signal that its maximum does not already carry. This direction is closed.
+
+**Cascade — this is where the result is.**
+Run `base` on everything, escalate the samples it is least sure about (smallest
+`|p - 0.5|`) to `large`. Cost is additive: 180 ms always, plus 389 ms on the escalated
+fraction.
+
+| Escalated | F1 | vs base | large's gain kept | Avg latency | vs base |
+|---|---|---|---|---|---|
+| 0% (base only) | 0.7607 | — | 0% | 180 ms | 1.00x |
+| 10% | 0.7786 | +1.79pp | 57% | 219 ms | 1.22x |
+| 15% | 0.7814 | +2.07pp | 66% | 238 ms | 1.32x |
+| 30% | 0.7872 | +2.65pp | 84% | 297 ms | 1.65x |
+| **40%** | **0.7930** | **+3.23pp** | **102%** | **336 ms** | 1.86x |
+| 50% | 0.7946 | +3.39pp | 107% | 374 ms | 2.08x |
+| 100% (large only) | 0.7922 | +3.16pp | 100% | 569 ms | 3.16x |
+
+Two things stand out. Escalating 10% of traffic recovers 57% of large's gain for 22%
+more latency. And from 40% on, the cascade **beats always-running-large outright** —
+0.7930 vs 0.7922 — while costing 336 ms against large-only's 389 ms. Sending every
+request to the bigger model is not just expensive, it is worse than routing, because
+`base` is right about some cases `large` gets wrong.
+
 ## Where this goes next (MVP-1)
 
-Findings 1 and 3 point the same direction: the accuracy left on the table is in how
-scores are turned into decisions and how requests are routed, not in the encoder. That
-is also the only direction available under this project's constraints — a local 4GB GPU,
-no cloud, and no LLM API budget, which rules out both fine-tuning and an LLM judge.
+The probe reorders the plan. Under this project's constraints — a local 4GB GPU, no
+cloud, no LLM API budget, so no fine-tuning and no LLM judge — the work is:
 
-1. **Per-task calibration and aggregation.** Replace `any-token > 0.5` with a tuned
-   aggregation (max / top-k mean / logsumexp / count-above-τ) and per-task thresholds,
-   fitted on train and reported once on test.
-2. **A CPU-side fusion head.** Token-probability statistics plus the linguistic features
-   already in `src/detector/confidence_scorer.py`, fed to logistic regression / GBDT.
-   Open question: can `base` + a 20-feature head match `large`?
-3. **A confidence-gated cascade.** Run `base` on everything, escalate only the uncertain
-   tail to `large`, and trace the F1-versus-latency Pareto curve using the measured
-   180 ms / 389 ms operating points above.
+1. **The cascade, as the headline.** Fit the escalation gate on train, report the
+   F1-versus-latency Pareto curve once on test. The oracle curve above says the shape is
+   there; what remains is showing it survives honest fitting.
+2. **Per-task thresholds, as a cheap add-on.** +2.20pp oracle, so expect ~+1pp real.
+   Folded into the cascade rather than sold separately.
+3. **A CPU-side fusion head, as the open question.** Aggregation statistics are dead, but
+   a *learned* combination of `max`, answer length, task type and the linguistic features
+   in `src/detector/confidence_scorer.py` has not been tested. Given how flat the
+   aggregation table is, this one may well come back negative — which is worth reporting
+   either way.
 
-All three need per-sample token probabilities on both splits, so the first deliverable is
-a one-time score dump that must re-derive 76.07 / 79.22 exactly before anything is built
-on it.
+Everything above runs off one score dump per model per split
+(`scripts/dump_scores.py`), which must re-derive 76.07 / 79.22 exactly before anything
+is built on it. Both test dumps now pass that gate on all 16 metrics.
 
 ## Reference points for later comparison
 

@@ -235,10 +235,10 @@ def merge(model_key: str, split: str, bounds, keep, limit: int | None) -> Path:
     y_true: list[int] = []
     for start, end in bounds:
         z = np.load(part_path(model_key, split, start, end, limit), allow_pickle=False)
-        off = z["offsets"]
+        off, flat = z["offsets"], z["probs"]  # once each; see load_dump
         n = len(off) - 1
         assert n == end - start, f"part [{start}:{end}] holds {n} samples, expected {end - start}"
-        per_sample.extend(z["probs"][off[i] : off[i + 1]] for i in range(n))
+        per_sample.extend(flat[off[i] : off[i + 1]] for i in range(n))
         y_true.extend(z["y_true"].tolist())
 
     assert len(per_sample) == len(keep), f"merged {len(per_sample)} samples, expected {len(keep)}"
@@ -269,9 +269,11 @@ def merge(model_key: str, split: str, bounds, keep, limit: int | None) -> Path:
 
 def load_dump(path: Path) -> dict:
     z = np.load(path, allow_pickle=False)
-    off = z["offsets"]
+    # Read each member once. Indexing an NpzFile decompresses the whole array on every
+    # access, so `z["probs"][a:b]` inside a loop re-inflates the entire dump per sample.
+    off, flat = z["offsets"], z["probs"]
     return {
-        "probs": [z["probs"][off[i] : off[i + 1]] for i in range(len(off) - 1)],
+        "probs": [flat[off[i] : off[i + 1]] for i in range(len(off) - 1)],
         "y_true": z["y_true"],
         "task_type": z["task_type"],
         "source_idx": z["source_idx"],
