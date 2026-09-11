@@ -202,9 +202,9 @@ request to the bigger model is not just expensive, it is worse than routing, bec
 The probe reorders the plan. Under this project's constraints — a local 4GB GPU, no
 cloud, no LLM API budget, so no fine-tuning and no LLM judge — the work is:
 
-1. **The cascade, as the headline.** Fit the escalation gate on train, report the
-   F1-versus-latency Pareto curve once on test. The oracle curve above says the shape is
-   there; what remains is showing it survives honest fitting.
+1. **The cascade, as the headline.** Report the F1-versus-latency curve on held-out
+   data. The oracle curve above says the shape is there; what remains is showing it
+   survives honest evaluation.
 2. **Per-task thresholds, as a cheap add-on.** +2.20pp oracle, so expect ~+1pp real.
    Folded into the cascade rather than sold separately.
 3. **A CPU-side fusion head, as the open question.** Aggregation statistics are dead, but
@@ -215,7 +215,14 @@ cloud, no LLM API budget, so no fine-tuning and no LLM judge — the work is:
 
 Everything above runs off one score dump per model per split
 (`scripts/dump_scores.py`), which must re-derive 76.07 / 79.22 exactly before anything
-is built on it. Both test dumps now pass that gate on all 16 metrics.
+is built on it. Both test dumps pass that gate on all 16 metrics.
+
+**Outcome: [RESULTS_MVP1.md](RESULTS_MVP1.md).** Items 1 and 2 are done. One assumption
+above turned out to be wrong and is worth flagging here: fitting on `train` is not
+available, because the v1 checkpoints were trained on that split
+(`vendor/LettuceDetect/scripts/train.py`), which makes those scores in-sample — base
+scores F1 0.9652 there against 0.7607 on test. Fitting is done on half of test instead,
+with the other half held out. Item 3 remains open.
 
 ## Reference points for later comparison
 
